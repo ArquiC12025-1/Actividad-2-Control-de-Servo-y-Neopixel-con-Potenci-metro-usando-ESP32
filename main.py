@@ -1,100 +1,104 @@
-from tm1637 import TM1637
-from machine import Pin, ADC, PWM
+#Autores: Andres Galvis, Keppler Sánchez y Daniel Viafara
+
+from machine import Pin, PWM, ADC
 from neopixel import NeoPixel
 import utime
+from tm1637 import TM1637
 
-# Configuración de la pantalla TM1637
-tm = TM1637(clk=Pin(2), dio=Pin(5))
-
-# Configuración del potenciómetro
-potenciometro = ADC(Pin(32))
-potenciometro.atten(ADC.ATTN_11DB)
-potenciometro.width(ADC.WIDTH_12BIT)
-
-# Configuración del servo en ESP32
+# Configuración del servo 
 servo = PWM(Pin(13), freq=50)
 
-# Configuración de Neopixel
-pixels = NeoPixel(Pin(15), 16)
+# Configuración de la tira Neopixel
+num_leds = 16
+pixels = NeoPixel(Pin(15), num_leds)
 
-# Definición de colores en Neopixel
-red_gradient = [
-    (255, 0, 0), (220, 0, 0), (190, 10, 0), (160, 20, 0),
-    (130, 30, 0), (100, 40, 0), (70, 50, 0), (40, 60, 0),
-    (10, 70, 0), (0, 80, 0), (0, 90, 10), (0, 100, 20),
-    (0, 110, 30), (0, 120, 40), (0, 130, 50), (255, 255, 255)  # Blanco en movimiento
-]
+# Configuración del potenciómetro 
+potenciometro = ADC(Pin(32))
+potenciometro.atten(ADC.ATTN_11DB)  
+potenciometro.width(ADC.WIDTH_12BIT) 
 
-green_gradient = [
-    (0, 255, 0), (0, 220, 0), (0, 190, 10), (0, 160, 20),
-    (0, 130, 30), (0, 100, 40), (0, 70, 50), (0, 40, 60),
-    (0, 10, 70), (10, 0, 80), (20, 0, 90), (30, 0, 100),
-    (40, 0, 110), (50, 0, 120), (60, 0, 130), (255, 255, 255)  # Blanco en movimiento
-]
+# Configuración de la pantalla TM1637
+try:
+    tm = TM1637(clk=Pin(2), dio=Pin(5))
+except:
+    tm = None
 
-# Lista de ángulos de rotación del servo
-angulos = [
-    0, 10, 20, 30, 40, 50, 60, 70, 80, 85, 90, 95, 100, 110, 120, 130,
-    140, 150, 160, 170, 180, 170, 160, 150, 140, 130, 120, 110, 100, 90, 80, 70,
-    60, 50, 40, 30, 20, 10, 0
-]
+# Configuración del botón de pausa
+boton_pausa = Pin(4, Pin.IN, Pin.PULL_UP)
+ultimo_estado_boton = 1  # Para evitar rebotes
 
-# Función para mapear valores a duty cycle (ESP32 usa 40 a 115)
+# Función para mapear valores
 def map_value(x, in_min, in_max, out_min, out_max):
     return round((x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
 
 # Función para mover el servo a un ángulo específico
-def angulo(a):
-    pwm_value = map_value(a, 0, 180, 40, 115)  
+def mover_servo(angulo):
+    pwm_value = map_value(angulo, 0, 180, 40, 115)  
     servo.duty(pwm_value)
 
-# Función para actualizar los colores del Neopixel
-def actualizar_neopixel(direccion):
-    if direccion == -1:
-        red_gradient.insert(0, red_gradient.pop())  # Mover rojo en sentido antihorario
-        for j in range(16):
-            pixels[j] = red_gradient[j]
-    else:
-        green_gradient.append(green_gradient.pop(0))  # Mover verde en sentido horario
-        for j in range(16):
-            pixels[j] = green_gradient[j]
+# Genera un degradado en rojo o azul con intensidad según la velocidad
+def generar_degradado(base_color, intensidad):
+    intensidad = max(0.2, min(intensidad, 1.0))  
+    return [(int(base_color[0] * (i / num_leds) * intensidad), 
+             int(base_color[1] * (i / num_leds) * intensidad), 
+             int(base_color[2] * (i / num_leds) * intensidad)) for i in range(num_leds)]
+
+# Función para actualizar el Neopixel
+def actualizar_neopixel(angulo, direccion, velocidad):
+    posicion_led = round((angulo / 180) * (num_leds - 1))
+
+    intensidad = max(0.3, 1 - (velocidad / 100))  
+    gradient = generar_degradado((255, 0, 0) if direccion == 1 else (0, 0, 255), intensidad)
+
+    # Transición de color cuando cambia de dirección
+    if angulo == 0 or angulo == 180:
+        gradient = generar_degradado((255, 50, 50), 0.5)
+
+    for i in range(num_leds):
+        pixels[i] = gradient[i]
+    
+    pixels[posicion_led] = (255, 255, 255)  # Pixel blanco sigue el movimiento
     pixels.write()
 
-# Función para mostrar valores decimales en TM1637
-def mostrar_decimal_tm1637(valor):
-    entero = int(valor)  
-    decimal = int((valor - entero) * 10)  
-    tm.show(f"{entero}{decimal}")
+# Función para manejar el botón de pausa con debounce
+def leer_boton():
+    global ultimo_estado_boton
+    estado_actual = boton_pausa.value()
+    
+    if estado_actual == 0 and ultimo_estado_boton == 1:  # Cambio detectado (botón presionado)
+        utime.sleep(0.05)  # Pequeño delay para evitar rebote
+        ultimo_estado_boton = 0
+        return True
+    elif estado_actual == 1:
+        ultimo_estado_boton = 1  # Se resetea cuando se suelta el botón
+    
+    return False
 
 # Función principal
 def main():
-    direccion = 1  # 1 para horario, -1 para antihorario
-    indice = 0  # Control del ángulo actual
+    angulo = 0
+    direccion = 1  # 1: Derecha, -1: Izquierda
+    pausado = False
 
     while True:
-        # Leer el valor del potenciómetro y escalarlo
-        poten = potenciometro.read() / 50
-        delay = map_value(poten, 0, 40.95, 1, 20)  
-        
-        mostrar_decimal_tm1637(poten)
+        if leer_boton():  # Si se detecta el botón presionado
+            pausado = not pausado  # Cambia el estado de pausa
 
-        print(f"Potenciómetro: {poten:.2f}, Delay: {delay} ms")
+        if not pausado:
+            velocidad = max(10, potenciometro.read() // 2)  # Ajusta velocidad mínima
+            mover_servo(angulo)
+            actualizar_neopixel(angulo, direccion, velocidad)
+            
+            if tm:
+                tm.number(velocidad)  # Muestra la velocidad en la pantalla TM1637
 
-        angulo_actual = angulos[indice]
-        angulo(angulo_actual)
+            if angulo >= 180:
+                direccion = -1
+            elif angulo <= 0:
+                direccion = 1
 
-        # Determinar dirección de rotación del Neopixel
-        if indice > 0:
-            direccion = 1 if angulos[indice] > angulos[indice - 1] else -1
-
-        # Aplicar la rotación en Neopixel
-        actualizar_neopixel(direccion)
-
-        # Avanzar en la lista de ángulos
-        indice = (indice + 1) % len(angulos)
-
-        # Pequeña pausa en cada iteración (según el potenciómetro)
-        utime.sleep_ms(delay)
+            angulo += direccion * 5  # Movimiento en pasos de 5°
+            utime.sleep_ms(velocidad)
 
 if __name__ == "__main__":
     main()
